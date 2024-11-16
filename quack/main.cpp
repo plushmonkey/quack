@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <bit>
 #include <iostream>
 #include <string_view>
 #include <vector>
@@ -57,6 +58,10 @@ struct ChunkedBufferReader {
 
     Peek(&result, sizeof(result));
 
+    if constexpr (std::endian::native == std::endian::little) {
+      result = bswap_16(result);
+    }
+
     return result;
   }
 
@@ -69,6 +74,10 @@ struct ChunkedBufferReader {
 
     Peek(&result, sizeof(result));
 
+    if constexpr (std::endian::native == std::endian::little) {
+      result = bswap_32(result);
+    }
+
     return result;
   }
 
@@ -80,6 +89,10 @@ struct ChunkedBufferReader {
     }
 
     Peek(&result, sizeof(result));
+
+    if constexpr (std::endian::native == std::endian::little) {
+      result = bswap_64(result);
+    }
 
     return result;
   }
@@ -181,7 +194,7 @@ struct FrameHeader {
   u64 payload_size = 0;
   OpCode opcode = OpCode::Continuation;
   FrameHeaderFlags flags = 0;
-  u32 mask = 0;
+  u8 mask[4];
 };
 
 struct Session {
@@ -193,6 +206,8 @@ struct Session {
   http::Header header;
 
   FrameHeader current_frame_header;
+
+  std::string payload;
 
   void FormHeader(size_t size) {
     header_view.resize(size);
@@ -252,7 +267,7 @@ struct Session {
     while (remaining_size > 0) {
       BufferChunk* chunk = buffer.last_chunk;
 
-      if (chunk->size >= QUACK_ARRAY_SIZE(chunk->data)) {
+      if (chunk->offset + chunk->size >= QUACK_ARRAY_SIZE(chunk->data)) {
         buffer.last_chunk->next = new BufferChunk;
 
         if (!buffer.last_chunk->next) {
@@ -263,12 +278,12 @@ struct Session {
         chunk = buffer.last_chunk = buffer.last_chunk->next;
       }
 
-      size_t write_size = QUACK_ARRAY_SIZE(chunk->data) - chunk->size;
+      size_t write_size = QUACK_ARRAY_SIZE(chunk->data) - chunk->size - chunk->offset;
       if (write_size > remaining_size) write_size = remaining_size;
 
       buffer.total_size += write_size;
 
-      memcpy(chunk->data + chunk->size, write_ptr, write_size);
+      memcpy(chunk->data + chunk->offset + chunk->size, write_ptr, write_size);
       chunk->size += write_size;
       write_ptr += write_size;
 
@@ -350,28 +365,28 @@ struct Session {
         if (buffer.total_size < current_frame_header.payload_size) return true;
 
         if (current_frame_header.payload_size > 0) {
-          // Grab data then unmask
-          u8* payload = (u8*)malloc(current_frame_header.payload_size);
-          if (!payload) return false;
-
           ChunkedBufferReader reader(buffer);
 
-          if (!reader.Peek(payload, current_frame_header.payload_size)) {
-            free(payload);
-            return true;
-          }
+          size_t frame_offset = payload.size();
+          payload.resize(frame_offset + current_frame_header.payload_size);
 
+          char* frame_payload = &payload[frame_offset];
+
+          // Read the frame payload into the end of the full payload buffer.
+          // This cannot fail the buffer was checked to have the entire payload size.
+          reader.Peek(frame_payload, current_frame_header.payload_size);
           reader.Consume();
 
-          u8* mask = (u8*)&current_frame_header.mask;
-
-          for (size_t i = 0; i < current_frame_header.payload_size; ++i) {
-            payload[i] ^= mask[i % 4];
+          if (current_frame_header.flags & FrameHeaderFlag_Masked) {
+            for (size_t i = 0; i < current_frame_header.payload_size; ++i) {
+              frame_payload[i] ^= current_frame_header.mask[i % 4];
+            }
           }
 
-          printf("Payload: %.*s\n", (u32)current_frame_header.payload_size, payload);
-
-          free(payload);
+          if (current_frame_header.flags & FrameHeaderFlag_Fin) {
+            std::cout << "Payload: " << payload << std::endl;
+            payload.clear();
+          }
         }
 
         if (current_frame_header.opcode == OpCode::Close) {
@@ -394,12 +409,13 @@ struct Session {
   bool ParseFrameHeader() {
     // Parse frame header
     ChunkedBufferReader reader(buffer);
-    auto frame_header = reader.PeekU16();
 
-    if (!frame_header) return false;
+    u16 frame_header;
 
-    u8 opcode_value = *frame_header & 0xFF;
-    u8 payload_len = *frame_header >> 8;
+    if (!reader.Peek(&frame_header, sizeof(frame_header))) return false;
+
+    u8 opcode_value = frame_header & 0xFF;
+    u8 payload_len = frame_header >> 8;
 
     bool fin = opcode_value & (1 << 7);
     bool masked = payload_len & (1 << 7);
@@ -423,22 +439,18 @@ struct Session {
       total_len = *opt_ext_payload;
     }
 
-    u32 mask = 0;
-
-    if (masked) {
-      auto opt_mask = reader.PeekU32();
-      if (!opt_mask) return false;
-
-      mask = *opt_mask;
+    if (masked && !reader.Peek(current_frame_header.mask, sizeof(current_frame_header.mask))) {
+      return false;
     }
 
-    current_frame_header.opcode = opcode;
+    if (opcode != OpCode::Continuation) {
+      current_frame_header.opcode = opcode;
+    }
     current_frame_header.payload_size = total_len;
     current_frame_header.flags = FrameHeaderFlag_Parsed;
 
     if (masked) {
       current_frame_header.flags |= FrameHeaderFlag_Masked;
-      current_frame_header.mask = mask;
     }
 
     if (fin) {
@@ -454,14 +466,15 @@ struct Session {
 static bool OnRecv(ConnectionUserData user, char* data, size_t size) {
   Session* session = (Session*)user;
 
+#if 0
   if (session->state != SessionState::Connecting) {
     printf("Data: ");
     for (size_t i = 0; i < size; ++i) {
       printf("%02X ", (u8)data[i]);
     }
     printf("\n");
-    //printf("Data: %.*s\n", (u32)size, data);
   }
+#endif
   session->AppendData(data, size);
 
   return session->ProcessData();
