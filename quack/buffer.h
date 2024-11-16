@@ -46,4 +46,25 @@ struct ChunkedBufferReader {
   void Consume();
 };
 
+struct BufferWriter {
+  u8* data;
+  u8* ptr;
+  size_t max_size;
+
+  BufferWriter(u8* data, size_t max_size) : data(data), max_size(max_size), ptr(data) {}
+
+  bool WriteU8(u8 data);
+  bool WriteU16(u16 data);
+  bool WriteU32(u32 data);
+  bool WriteU64(u64 data);
+
+  inline size_t GetWrittenSize() const { return (size_t)(ptr - data); }
+
+  inline bool CanWrite(size_t size) const {
+    u8* end = data + max_size;
+    u8* req_end = ptr + size;
+    return end >= req_end;
+  }
+};
+
 }  // namespace quack

@@ -235,6 +235,11 @@ struct Session {
 
           if (current_frame_header.flags & FrameHeaderFlag_Fin) {
             std::cout << "Payload: " << payload << std::endl;
+
+            if (current_frame_header.opcode == OpCode::Text || current_frame_header.opcode == OpCode::Binary) {
+              //  Echo back
+              SendFrame(current_frame_header.opcode, payload);
+            }
             payload.clear();
           }
         }
@@ -254,6 +259,33 @@ struct Session {
     }
 
     return true;
+  }
+
+  void SendFrame(OpCode opcode, std::string_view data) {
+    constexpr size_t kMaxHeaderSize = 10;
+
+    u8 header_data[kMaxHeaderSize];
+    size_t a = sizeof(header_data);
+    BufferWriter writer(header_data, sizeof(header_data));
+
+    writer.WriteU8((u8)opcode | (1 << 7));
+
+    if (data.size() > 0xFFFF) {
+      // Data size exceeds ushort, write as u32
+      writer.WriteU8(127);
+      writer.WriteU64((u64)data.size());
+    } else if (data.size() > 125) {
+      // Data size exceeds 7 bits, write as u16
+      writer.WriteU8(126);
+      writer.WriteU16((u16)data.size());
+    } else {
+      writer.WriteU8((u8)data.size());
+    }
+
+    send(socket, (char*)header_data, (int)writer.GetWrittenSize(), 0);
+    // TODO: This won't work for very large payloads because of the truncation.
+    // But it doesn't really matter because the entire sending would need to be written differently for large paylods.
+    send(socket, data.data(), (int)data.size(), 0);
   }
 
   bool ParseFrameHeader() {

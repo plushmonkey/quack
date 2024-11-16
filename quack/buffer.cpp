@@ -1,6 +1,7 @@
 #include "buffer.h"
 
 #include <assert.h>
+#include <string.h>
 
 #include <bit>
 #include <optional>
@@ -124,6 +125,45 @@ void ChunkedBufferReader::Consume() {
   this->current_chunk = buffer.chunks;
   this->current_read_offset = 0;
   this->total_read_size = 0;
+}
+
+bool BufferWriter::WriteU8(u8 data) {
+  if (!CanWrite(sizeof(data))) return false;
+
+  *ptr = data;
+  ptr += sizeof(data);
+
+  return true;
+}
+
+bool BufferWriter::WriteU16(u16 data) {
+  if (!CanWrite(sizeof(data))) return false;
+
+  data = bswap_16(data);
+  memcpy(ptr, &data, sizeof(data));
+  ptr += sizeof(data);
+
+  return true;
+}
+
+bool BufferWriter::WriteU32(u32 data) {
+  if (!CanWrite(sizeof(data))) return false;
+
+  data = bswap_32(data);
+  memcpy(ptr, &data, sizeof(data));
+  ptr += sizeof(data);
+
+  return true;
+}
+
+bool BufferWriter::WriteU64(u64 data) {
+  if (!CanWrite(sizeof(data))) return false;
+
+  data = bswap_64(data);
+  memcpy(ptr, &data, sizeof(data));
+  ptr += sizeof(data);
+
+  return true;
 }
 
 }  // namespace quack
