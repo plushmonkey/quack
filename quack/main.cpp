@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include <iostream>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -44,7 +45,7 @@ struct FrameHeader {
   u64 payload_size = 0;
   OpCode opcode = OpCode::Continuation;
   FrameHeaderFlags flags = 0;
-  u8 mask[4];
+  u8 mask[4] = {};
 };
 
 struct Session {
@@ -82,7 +83,7 @@ struct Session {
 
     while (chunk) {
       for (size_t i = 0; i < chunk->size; ++i) {
-        if (chunk->data[i] == kSearch[search_index & 1]) {
+        if (chunk->data[chunk->offset + i] == kSearch[search_index & 1]) {
           ++search_index;
 
           if (++run_length == kSearchLength) {
@@ -234,7 +235,7 @@ struct Session {
           }
 
           if (current_frame_header.flags & FrameHeaderFlag_Fin) {
-            std::cout << "Payload: " << payload << std::endl;
+            // std::cout << "Payload: " << payload << std::endl;
 
             if (current_frame_header.opcode == OpCode::Text || current_frame_header.opcode == OpCode::Binary) {
               //  Echo back
@@ -265,7 +266,6 @@ struct Session {
     constexpr size_t kMaxHeaderSize = 10;
 
     u8 header_data[kMaxHeaderSize];
-    size_t a = sizeof(header_data);
     BufferWriter writer(header_data, sizeof(header_data));
 
     writer.WriteU8((u8)opcode | (1 << 7));
@@ -305,6 +305,12 @@ struct Session {
     payload_len &= 0x7F;
     opcode_value &= 0x0F;
 
+    if (opcode_value > 2 && opcode_value < 8) {
+      fprintf(stderr, "Bad opcode: %d\n", (int)opcode_value);
+      close(socket);
+      return false;
+    }
+
     OpCode opcode = (OpCode)opcode_value;
 
     u64 total_len = payload_len;
@@ -328,6 +334,7 @@ struct Session {
     if (opcode != OpCode::Continuation) {
       current_frame_header.opcode = opcode;
     }
+
     current_frame_header.payload_size = total_len;
     current_frame_header.flags = FrameHeaderFlag_Parsed;
 
@@ -341,6 +348,7 @@ struct Session {
 
     // Consume entire frame header.
     reader.Consume();
+
     return true;
   }
 };
@@ -363,9 +371,10 @@ static bool OnRecv(ConnectionUserData user, char* data, size_t size) {
 }
 
 static ConnectionUserData OnAccept(ServerUserData user, QuackSocket socket) {
-  printf("New user connection %d\n", (s32)socket);
+  // printf("New user connection %d\n", (s32)socket);
 
   Session* session = new Session;
+
   session->socket = socket;
 
   return session;

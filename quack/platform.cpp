@@ -9,13 +9,17 @@
 
 namespace quack {
 
-void PrintNetworkError(const char* format) {
+int PrintNetworkError(const char* format) {
   char* buffer = nullptr;
 
+  int last_error = WSAGetLastError();
   FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
-                 WSAGetLastError(), 0, (LPSTR)&buffer, 0, nullptr);
+                 last_error, 0, (LPSTR)&buffer, 0, nullptr);
 
+  fprintf(stderr, "[%d] ", last_error);
   fprintf(stderr, format, buffer);
+
+  return last_error;
 }
 
 struct NetworkInitializer {
@@ -37,8 +41,10 @@ NetworkInitializer _net_init;
 
 namespace quack {
 
-static inline void PrintNetworkError(const char* format) {
-  fprintf(stderr, format, strerror(errno));
+static inline int PrintNetworkError(const char* format) {
+  int e = errno;
+  fprintf(stderr, format, strerror(e));
+  return e;
 }
 
 }  // namespace quack

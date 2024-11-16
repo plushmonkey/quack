@@ -94,7 +94,7 @@ struct ThreadContext {
       if (!target) break;
 
       next = target->next;
-    } while (target && InterlockedExchangePointer((PVOID*)&free_ctx, next) != target);
+    } while (target && InterlockedCompareExchangePointer((PVOID*)&free_ctx, next, target) != target);
 
     QuackIocpContext* result = target;
 
@@ -105,6 +105,7 @@ struct ThreadContext {
 
     result->overlapped = {};
     result->operation = IoOperation::Read;
+    result->read.fd = 0;
 
     result->owner = this;
 
@@ -124,14 +125,15 @@ struct ThreadContext {
   }
 
   inline void FreeIoReadContext(QuackIocpContext* ctx) {
+    ctx->user = 0;
+    ctx->read.fd = ~0;
+
     QuackIocpContext* target = free_ctx;
 
     do {
       target = free_ctx;
       ctx->next = target;
-    } while (InterlockedExchangePointer((PVOID*)&free_ctx, ctx) != target);
-
-    // printf("Performing free %zu. Total: %zu. In free: %zu\n", thread_id, total_alloc, GetFreeCount());
+    } while (InterlockedCompareExchangePointer((PVOID*)&free_ctx, ctx, target) != target);
   }
 };
 
@@ -142,7 +144,7 @@ struct Win32IocpServer {
   ThreadContext* threads = nullptr;
   HANDLE io_handle = INVALID_HANDLE_VALUE;
 
-  bool initialize(DWORD concurrency) {
+  bool Initialize(DWORD concurrency) {
     printf("Creating io completion port\n");
 
     io_handle = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, (ULONG_PTR)0, concurrency);
@@ -226,7 +228,7 @@ static QuackSocket CreateListener(u16 port) {
 
   freeaddrinfo(res);
 
-  if (listen(sockfd, 10) != 0) {
+  if (listen(sockfd, 1024) != 0) {
     PrintNetworkError("listen: %s\n");
     return kInvalidSocket;
   }
@@ -242,7 +244,7 @@ bool QuackEventProcessorIocp::Start(u16 port) {
 
   printf("Starting iocp\n");
 
-  if (!server->initialize(concurrency)) {
+  if (!server->Initialize(concurrency)) {
     fprintf(stderr, "Failed to initialize iocp.\n");
     return false;
   }
@@ -261,8 +263,11 @@ bool QuackEventProcessorIocp::Start(u16 port) {
     return false;
   }
 
-  server->listen_ctx.read_buffer = (char*)malloc(buffer_size);
-  server->listen_ctx.write_buffer = (char*)malloc(buffer_size);
+  // The listen buffer must be large enough to store local and remote addrs.
+  size_t listen_buffer_size = sizeof(struct sockaddr_in) * 2 + 32;
+
+  server->listen_ctx.read_buffer = (char*)malloc(listen_buffer_size);
+  server->listen_ctx.write_buffer = (char*)malloc(listen_buffer_size);
 
   server->listen_ctx.wsa_buf_read.buf = server->listen_ctx.read_buffer;
   server->listen_ctx.wsa_buf_read.len = (ULONG)buffer_size;
@@ -311,14 +316,20 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
     if (!status) {
       fprintf(stderr, "Status was false: %d\n", GetLastError());
 
-      if (io->operation == IoOperation::Accept) {
-        close(io->accept.client_fd);
+      if (io) {
+        if (io->operation == IoOperation::Accept) {
+          close(io->accept.client_fd);
+          io->accept.client_fd = WSASocketW(AF_INET, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_OVERLAPPED);
 
-        io->accept.client_fd = WSASocketW(AF_INET, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_OVERLAPPED);
-
-        quack_acceptex(io->accept.listen_fd, io->accept.client_fd, io->wsa_buf_read.buf, 0,
-                       sizeof(struct sockaddr_in) + 16, sizeof(struct sockaddr_in) + 16, &io->accept.bytes_recv,
-                       &io->overlapped);
+          BOOL accepted = quack_acceptex(io->accept.listen_fd, io->accept.client_fd, io->wsa_buf_read.buf, 0,
+                                         sizeof(struct sockaddr_in) + 16, sizeof(struct sockaddr_in) + 16,
+                                         &io->accept.bytes_recv, &io->overlapped);
+          if (!accepted && WSAGetLastError() != ERROR_IO_PENDING) {
+            PrintNetworkError("Failed to call AcceptEx: %s\n");
+          }
+        } else {
+          close(io->read.fd);
+        }
       }
       continue;
     }
@@ -415,14 +426,20 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
           DWORD bytes_recv = 0;
           bool recv_more = false;
 
-          // printf("IoOperation::Read\n");
-
           if (WSAGetOverlappedResult(io->read.fd, &io->overlapped, &bytes_recv, FALSE, &flags)) {
             if (processor->recv_callback) {
               recv_more = processor->recv_callback(io->user, io->wsa_buf_read.buf, bytes_recv);
             }
           } else {
-            PrintNetworkError("WSAGetOverlappedResult: %s\n");
+            int err = PrintNetworkError("WSAGetOverlappedResult: %s\n");
+
+            if (processor->close_callback) {
+              processor->close_callback(io->user);
+            }
+
+            close(io->read.fd);
+
+            continue;
           }
 
           if (recv_more) {
@@ -431,10 +448,11 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
               PrintNetworkError("WSARecv (read): %s\n");
             }
           } else {
-            fprintf(stderr, "----------- Connection force closed on socket %u.\n\n", (unsigned int)io->read.fd);
+            // fprintf(stderr, "----------- Connection force closed on socket %u.\n\n", (unsigned int)io->read.fd);
             if (processor->close_callback) {
               processor->close_callback(io->user);
             }
+
             close(io->read.fd);
             io->owner->FreeIoReadContext(io);
           }
@@ -445,7 +463,7 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
             processor->close_callback(io->user);
           }
 
-          fprintf(stderr, "--------- Connection closed on socket %u.\n\n", (unsigned int)fd);
+          // fprintf(stderr, "--------- Connection closed on socket %u.\n\n", (unsigned int)fd);
           close(fd);
 
           io->owner->FreeIoReadContext(io);

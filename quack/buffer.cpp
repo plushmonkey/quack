@@ -81,6 +81,7 @@ bool ChunkedBufferReader::Peek(void* out, size_t amount) {
   }
 
   total_read_size += read_amount;
+  assert(total_read_size <= buffer.total_size);
 
   return true;
 }
@@ -120,7 +121,7 @@ void ChunkedBufferReader::Consume() {
     }
   }
 
-  buffer.total_size -= total_read_size;
+  buffer.total_size -= consumed;
 
   this->current_chunk = buffer.chunks;
   this->current_read_offset = 0;

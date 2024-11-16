@@ -31,6 +31,6 @@ namespace quack {
 
 constexpr QuackSocket kInvalidSocket = ~0;
 
-void PrintNetworkError(const char* format);
+int PrintNetworkError(const char* format);
 
 }  // namespace quack
