@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <quack/buffer.h>
 #include <quack/hash.h>
 #include <quack/http.h>
 #include <quack/platform.h>
@@ -6,7 +7,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <bit>
 #include <iostream>
 #include <string_view>
 #include <vector>
@@ -18,156 +18,6 @@ Track establishing connections so they can timeout.
 */
 
 using namespace quack;
-
-constexpr size_t kBufferSize = 1024;
-
-struct BufferChunk {
-  BufferChunk* next = nullptr;
-
-  // This is how far into the data that fresh data exists.
-  size_t offset = 0;
-  // How many bytes of data that exist from offset onward.
-  size_t size = 0;
-
-  char data[kBufferSize];
-};
-
-struct ChunkedBuffer {
-  BufferChunk* chunks = nullptr;
-  BufferChunk* last_chunk = nullptr;
-
-  size_t total_size = 0;
-};
-
-// Creates a reader around a chunked buffer that can be used to peek and consume.
-struct ChunkedBufferReader {
-  ChunkedBuffer& buffer;
-  BufferChunk* current_chunk;
-
-  size_t total_read_size = 0;
-  size_t current_read_offset = 0;
-
-  ChunkedBufferReader(ChunkedBuffer& buffer) : buffer(buffer), current_chunk(buffer.chunks) {}
-
-  std::optional<u16> PeekU16() {
-    u16 result = 0;
-
-    if (buffer.total_size - total_read_size < sizeof(result)) {
-      return {};
-    }
-
-    Peek(&result, sizeof(result));
-
-    if constexpr (std::endian::native == std::endian::little) {
-      result = bswap_16(result);
-    }
-
-    return result;
-  }
-
-  std::optional<u32> PeekU32() {
-    u32 result = 0;
-
-    if (buffer.total_size - total_read_size < sizeof(result)) {
-      return {};
-    }
-
-    Peek(&result, sizeof(result));
-
-    if constexpr (std::endian::native == std::endian::little) {
-      result = bswap_32(result);
-    }
-
-    return result;
-  }
-
-  std::optional<u64> PeekU64() {
-    u64 result = 0;
-
-    if (buffer.total_size - total_read_size < sizeof(result)) {
-      return {};
-    }
-
-    Peek(&result, sizeof(result));
-
-    if constexpr (std::endian::native == std::endian::little) {
-      result = bswap_64(result);
-    }
-
-    return result;
-  }
-
-  bool Peek(void* out, size_t amount) {
-    if (buffer.total_size - total_read_size < amount) return false;
-
-    size_t read_amount = 0;
-
-    while (current_chunk && read_amount < amount) {
-      size_t current_size = amount - read_amount;
-
-      if (current_size > current_chunk->size - current_read_offset) {
-        current_size = current_chunk->size - current_read_offset;
-      }
-
-      memcpy((u8*)out + read_amount, current_chunk->data + current_chunk->offset + current_read_offset, current_size);
-      read_amount += current_size;
-
-      if (current_size >= current_chunk->size - current_read_offset) {
-        // This chunk was fully peeked, move to the next one
-        current_read_offset = 0;
-        current_chunk = current_chunk->next;
-      } else {
-        current_read_offset += current_size;
-      }
-    }
-
-    total_read_size += read_amount;
-
-    return true;
-  }
-
-  // Conumes the chunks that were peeked off of the buffer. Adjusts new beginning chunk to point to new data.
-  void Consume() {
-    BufferChunk* chunk = buffer.chunks;
-
-    size_t consumed = 0;
-
-    while (chunk && consumed < total_read_size) {
-      size_t consume_size = total_read_size - consumed;
-
-      if (consume_size > chunk->size) consume_size = chunk->size;
-
-      consumed += consume_size;
-      chunk->size -= consume_size;
-
-      if (chunk->size == 0) {
-        // Delete this chunk
-        BufferChunk* old = chunk;
-
-        chunk = chunk->next;
-        buffer.chunks = chunk;
-
-        if (chunk == nullptr) {
-          buffer.last_chunk = nullptr;
-        }
-
-        delete old;
-      } else {
-        // This must be the last chunk, so move the offset forward by the amount read.
-        chunk->offset += consume_size;
-
-        assert(consumed == total_read_size);
-        break;
-      }
-    }
-
-    buffer.total_size -= total_read_size;
-
-    this->current_chunk = buffer.chunks;
-    this->current_read_offset = 0;
-    this->total_read_size = 0;
-  }
-};
 
 enum class SessionState {
   Connecting,

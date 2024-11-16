@@ -19,12 +19,14 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="quack\buffer.cpp" />
     <ClCompile Include="quack\hash.cpp" />
     <ClCompile Include="quack\main.cpp" />
     <ClCompile Include="quack\platform.cpp" />
     <ClCompile Include="quack\win32_event_processor_iocp.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="quack\buffer.h" />
     <ClInclude Include="quack\hash.h" />
     <ClInclude Include="quack\http.h" />
     <ClInclude Include="quack\platform.h" />
