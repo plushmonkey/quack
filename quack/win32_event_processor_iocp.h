@@ -13,10 +13,12 @@ typedef void* ServerUserData;
 // thread-local storage.
 typedef bool (*QuackRecvCallback)(ConnectionUserData user, char* data, size_t size);
 typedef ConnectionUserData (*QuackAcceptCallback)(ServerUserData user, QuackSocket socket);
+typedef void (*QuackCloseCallback)(ConnectionUserData user);
 
 struct QuackEventProcessorIocp {
   QuackRecvCallback recv_callback = nullptr;
   QuackAcceptCallback accept_callback = nullptr;
+  QuackCloseCallback close_callback = nullptr;
 
   ServerUserData server_user_data = nullptr;
 

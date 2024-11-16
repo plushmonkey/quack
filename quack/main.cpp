@@ -339,11 +339,17 @@ static ConnectionUserData OnAccept(ServerUserData user, QuackSocket socket) {
   return session;
 }
 
+static void OnClose(ConnectionUserData user) {
+  Session* session = (Session*)user;
+  delete session;
+}
+
 int main(int argc, char* argv[]) {
   QuackEventProcessorIocp iocp;
 
   iocp.accept_callback = OnAccept;
   iocp.recv_callback = OnRecv;
+  iocp.close_callback = OnClose;
   iocp.buffer_size = kBufferSize;
 
   if (!iocp.Start(8080)) {

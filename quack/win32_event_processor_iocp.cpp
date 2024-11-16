@@ -58,6 +58,8 @@ struct QuackIocpContext {
   // Must be first in struct
   WSAOVERLAPPED overlapped;
 
+  struct ThreadContext* owner;
+
   IoOperation operation;
 
   union {
@@ -82,21 +84,41 @@ struct ThreadContext {
 
   QuackIocpContext* free_ctx;
 
+  size_t total_alloc = 0;
+
+  size_t GetFreeCount() {
+    auto* ctx = free_ctx;
+    size_t count = 0;
+    while (ctx) {
+      ++count;
+      ctx = ctx->next;
+    }
+    return count;
+  }
+
   inline QuackIocpContext* AllocateIoContext(size_t buffer_size) {
     QuackIocpContext* result = free_ctx;
 
     if (!result) {
       free_ctx = (QuackIocpContext*)malloc(sizeof(QuackIocpContext));
+
       if (!free_ctx) return nullptr;
 
       free_ctx->next = nullptr;
       result = free_ctx;
+
+      ++total_alloc;
+      // printf("Alloc new %zu. Total: %zu. In free: %zu\n", thread_id, total_alloc, GetFreeCount());
+    } else {
+      // printf("Got from free list %zu. Total: %zu. In free: %zu\n", thread_id, total_alloc, GetFreeCount());
     }
 
     free_ctx = free_ctx->next;
 
     result->overlapped = {};
     result->operation = IoOperation::Read;
+
+    result->owner = this;
 
     result->user = nullptr;
     result->next = nullptr;
@@ -114,8 +136,14 @@ struct ThreadContext {
   }
 
   inline void FreeIoReadContext(QuackIocpContext* ctx) {
-    ctx->next = free_ctx;
-    free_ctx = ctx;
+    QuackIocpContext* target = free_ctx;
+
+    do {
+      target = free_ctx;
+      ctx->next = target;
+    } while (InterlockedExchangePointer((PVOID*)&free_ctx, ctx) != target);
+
+    // printf("Performing free %zu. Total: %zu. In free: %zu\n", thread_id, total_alloc, GetFreeCount());
   }
 };
 
@@ -416,16 +444,23 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
             }
           } else {
             fprintf(stderr, "----------- Connection force closed on socket %u.\n\n", (unsigned int)io->read.fd);
+            if (processor->close_callback) {
+              processor->close_callback(io->user);
+            }
             close(io->read.fd);
-            thread_ctx->FreeIoReadContext(io);
+            io->owner->FreeIoReadContext(io);
           }
         } else {
           QuackSocket fd = io->read.fd;
 
+          if (processor->close_callback) {
+            processor->close_callback(io->user);
+          }
+
           fprintf(stderr, "--------- Connection closed on socket %u.\n\n", (unsigned int)fd);
           close(fd);
 
-          thread_ctx->FreeIoReadContext(io);
+          io->owner->FreeIoReadContext(io);
         }
       } break;
       default: {
