@@ -84,36 +84,24 @@ struct ThreadContext {
 
   QuackIocpContext* free_ctx;
 
-  size_t total_alloc = 0;
-
-  size_t GetFreeCount() {
-    auto* ctx = free_ctx;
-    size_t count = 0;
-    while (ctx) {
-      ++count;
-      ctx = ctx->next;
-    }
-    return count;
-  }
-
   inline QuackIocpContext* AllocateIoContext(size_t buffer_size) {
-    QuackIocpContext* result = free_ctx;
+    QuackIocpContext* target = free_ctx;
+    QuackIocpContext* next = nullptr;
+
+    do {
+      target = free_ctx;
+
+      if (!target) break;
+
+      next = target->next;
+    } while (target && InterlockedExchangePointer((PVOID*)&free_ctx, next) != target);
+
+    QuackIocpContext* result = target;
 
     if (!result) {
-      free_ctx = (QuackIocpContext*)malloc(sizeof(QuackIocpContext));
-
-      if (!free_ctx) return nullptr;
-
-      free_ctx->next = nullptr;
-      result = free_ctx;
-
-      ++total_alloc;
-      // printf("Alloc new %zu. Total: %zu. In free: %zu\n", thread_id, total_alloc, GetFreeCount());
-    } else {
-      // printf("Got from free list %zu. Total: %zu. In free: %zu\n", thread_id, total_alloc, GetFreeCount());
+      result = (QuackIocpContext*)malloc(sizeof(QuackIocpContext));
+      if (!result) return nullptr;
     }
-
-    free_ctx = free_ctx->next;
 
     result->overlapped = {};
     result->operation = IoOperation::Read;
