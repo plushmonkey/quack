@@ -171,20 +171,20 @@ struct Session {
 
           // std::cout << "Websocket key: " << *websocket_key << std::endl;
 
-          Sha1Digest digest;
+          Sha1::Digest digest;
 
           constexpr uint8_t kWebsocketGuid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-          SHA1_CTX ctx;
+          Sha1::Context ctx;
 
-          SHA1_Init(&ctx);
-          SHA1_Update(&ctx, (uint8_t*)websocket_key->data(), websocket_key->size());
-          SHA1_Update(&ctx, kWebsocketGuid, sizeof(kWebsocketGuid) - 1);
-          SHA1_Final(&ctx, digest);
+          Sha1::Init(&ctx);
+          Sha1::Update(&ctx, (uint8_t*)websocket_key->data(), websocket_key->size());
+          Sha1::Update(&ctx, kWebsocketGuid, sizeof(kWebsocketGuid) - 1);
+          Sha1::Final(&ctx, digest);
 
-          char key_response[Base64::GetOutputSize(SHA1_DIGEST_SIZE)];
+          char key_response[Base64::GetOutputSize(Sha1::kDigestSize)];
 
-          if (!Base64::Encode(std::string_view((char*)digest, SHA1_DIGEST_SIZE), key_response, sizeof(key_response))) {
+          if (!Base64::Encode(std::string_view((char*)digest, Sha1::kDigestSize), key_response, sizeof(key_response))) {
             fprintf(stderr, "Failed to Base64 encode websocket key.\n");
             return false;
           }
@@ -233,21 +233,38 @@ struct Session {
               frame_payload[i] ^= current_frame_header.mask[i % 4];
             }
           }
-
-          if (current_frame_header.flags & FrameHeaderFlag_Fin) {
-            // std::cout << "Payload: " << payload << std::endl;
-
-            if (current_frame_header.opcode == OpCode::Text || current_frame_header.opcode == OpCode::Binary) {
-              //  Echo back
-              SendFrame(current_frame_header.opcode, payload);
-            }
-            payload.clear();
-          }
         }
 
-        if (current_frame_header.opcode == OpCode::Close) {
-          // TODO: Server is supposed to send its own close frame before closing connection.
-          return false;
+        if (current_frame_header.flags & FrameHeaderFlag_Fin) {
+          switch (current_frame_header.opcode) {
+            case OpCode::Text:
+            case OpCode::Binary: {
+              //  Echo back
+              SendFrame(current_frame_header.opcode, payload);
+            } break;
+            case OpCode::Close: {
+              // Server is supposed to send a close opcode in response to a close request.
+              // Write it out using a BufferWriter so it has the correct endianness.
+              u16 close_code = 0;
+              BufferWriter writer((u8*)&close_code, sizeof(close_code));
+
+              writer.WriteU16(1000);
+
+              SendFrame(OpCode::Close, std::string_view((char*)&close_code, sizeof(close_code)));
+
+              return false;
+            } break;
+            case OpCode::Ping: {
+              SendFrame(OpCode::Pong, payload);
+            } break;
+            case OpCode::Pong: {
+            } break;
+            default: {
+              fprintf(stderr, "Invalid OpCode received: %d\n", (s32)current_frame_header.opcode);
+            } break;
+          }
+
+          payload.clear();
         }
 
         // Clear parsed flag so we read a new frame header.

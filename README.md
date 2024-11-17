@@ -1,2 +1,3 @@
 # quack
-exploratory code for a threaded network service.  
+Exploratory code for a threaded network service.  
+Currently implements a simple websocket server.  

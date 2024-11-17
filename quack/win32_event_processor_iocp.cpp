@@ -202,6 +202,11 @@ struct Win32IocpServer {
   }
 };
 
+inline static void DisableTcpDelay(QuackSocket sockfd) {
+  u32 flag = 1;
+  setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+}
+
 static QuackSocket CreateListener(u16 port) {
   addrinfo hints = {}, *res = nullptr;
 
@@ -220,6 +225,8 @@ static QuackSocket CreateListener(u16 port) {
     PrintNetworkError("socket: %s\n");
     return kInvalidSocket;
   }
+
+  DisableTcpDelay(sockfd);
 
   if (bind(sockfd, res->ai_addr, (int)res->ai_addrlen) < 0) {
     PrintNetworkError("bind: %s\n");
@@ -314,12 +321,14 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
     QuackIocpContext* io = (QuackIocpContext*)overlapped;
 
     if (!status) {
-      fprintf(stderr, "Status was false: %d\n", GetLastError());
+      fprintf(stderr, "Status was false: %u\n", (u32)GetLastError());
 
       if (io) {
         if (io->operation == IoOperation::Accept) {
           close(io->accept.client_fd);
           io->accept.client_fd = WSASocketW(AF_INET, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_OVERLAPPED);
+
+          DisableTcpDelay(io->accept.client_fd);
 
           BOOL accepted = quack_acceptex(io->accept.listen_fd, io->accept.client_fd, io->wsa_buf_read.buf, 0,
                                          sizeof(struct sockaddr_in) + 16, sizeof(struct sockaddr_in) + 16,
@@ -403,6 +412,8 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
         }
 
         io->accept.client_fd = WSASocketW(AF_INET, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_OVERLAPPED);
+
+        DisableTcpDelay(io->accept.client_fd);
 
         // printf("Beginning new accept (%d)\n", (int)io->accept.client_fd);
         // fflush(stdout);

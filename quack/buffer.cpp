@@ -140,7 +140,10 @@ bool BufferWriter::WriteU8(u8 data) {
 bool BufferWriter::WriteU16(u16 data) {
   if (!CanWrite(sizeof(data))) return false;
 
-  data = bswap_16(data);
+  if constexpr (std::endian::native == std::endian::little) {
+    data = bswap_16(data);
+  }
+
   memcpy(ptr, &data, sizeof(data));
   ptr += sizeof(data);
 
@@ -150,7 +153,10 @@ bool BufferWriter::WriteU16(u16 data) {
 bool BufferWriter::WriteU32(u32 data) {
   if (!CanWrite(sizeof(data))) return false;
 
-  data = bswap_32(data);
+  if constexpr (std::endian::native == std::endian::little) {
+    data = bswap_32(data);
+  }
+
   memcpy(ptr, &data, sizeof(data));
   ptr += sizeof(data);
 
@@ -160,7 +166,10 @@ bool BufferWriter::WriteU32(u32 data) {
 bool BufferWriter::WriteU64(u64 data) {
   if (!CanWrite(sizeof(data))) return false;
 
-  data = bswap_64(data);
+  if constexpr (std::endian::native == std::endian::little) {
+    data = bswap_64(data);
+  }
+
   memcpy(ptr, &data, sizeof(data));
   ptr += sizeof(data);
 
