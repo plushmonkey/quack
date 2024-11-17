@@ -60,6 +60,12 @@ struct Session {
 
   std::string payload;
 
+  enum class ProcessResult {
+    Pending,
+    Consumed,
+    Disconnect,
+  };
+
   void FormHeader(size_t size) {
     header_view.resize(size);
 
@@ -110,8 +116,6 @@ struct Session {
       buffer.chunks = buffer.last_chunk = new BufferChunk;
     }
 
-    // printf("Data: %.*s\n", (u32)size, data);
-
     size_t remaining_size = size;
     char* write_ptr = data;
 
@@ -142,7 +146,7 @@ struct Session {
     }
   }
 
-  bool ProcessData() {
+  ProcessResult ProcessData() {
     switch (state) {
       // This state deals with upgrading the connection, so it must parse http headers.
       case SessionState::Connecting: {
@@ -150,26 +154,21 @@ struct Session {
 
         if (header_size > 0) {
           FormHeader(header_size);
-          // printf("Total header: %s", header_view.data());
 
           auto result = http::Header::Parse(header_view);
 
           if (!result) {
             fprintf(stderr, "Failed to parse header: %d\n", (s32)result.error());
-            return false;
+            return ProcessResult::Disconnect;
           }
 
           header = *result;
           http::Request& request = header.request;
 
-          // std::cout << "Request: " << request.method << ", " << request.uri << ", " << request.version << std::endl;
-
           auto websocket_key = header.GetField("Sec-WebSocket-Key");
 
           // End connection because it's not valid.
-          if (!websocket_key) return false;
-
-          // std::cout << "Websocket key: " << *websocket_key << std::endl;
+          if (!websocket_key) return ProcessResult::Disconnect;
 
           Sha1::Digest digest;
 
@@ -186,7 +185,7 @@ struct Session {
 
           if (!Base64::Encode(std::string_view((char*)digest, Sha1::kDigestSize), key_response, sizeof(key_response))) {
             fprintf(stderr, "Failed to Base64 encode websocket key.\n");
-            return false;
+            return ProcessResult::Disconnect;
           }
 
           char response[1024];
@@ -197,23 +196,24 @@ struct Session {
 
           std::string_view response_view(response, response_size);
 
-          // std::cout << "Sending: " << response_view << std::endl;
           send(this->socket, response, response_size, 0);
 
           state = SessionState::Upgraded;
 
-          return true;
+          return ProcessResult::Pending;
         }
       } break;
       case SessionState::Upgraded: {
         if (!(current_frame_header.flags & FrameHeaderFlag_Parsed)) {
-          if (!ParseFrameHeader()) {
-            return true;
+          ProcessResult parse_result = ParseFrameHeader();
+
+          if (parse_result != ProcessResult::Consumed) {
+            return parse_result;
           }
         }
 
         // If we have a fully parsed header, try to consume the entire payload.
-        if (buffer.total_size < current_frame_header.payload_size) return true;
+        if (buffer.total_size < current_frame_header.payload_size) return ProcessResult::Pending;
 
         if (current_frame_header.payload_size > 0) {
           ChunkedBufferReader reader(buffer);
@@ -224,7 +224,7 @@ struct Session {
           char* frame_payload = &payload[frame_offset];
 
           // Read the frame payload into the end of the full payload buffer.
-          // This cannot fail the buffer was checked to have the entire payload size.
+          // This cannot fail because the buffer was checked to have the entire payload size.
           reader.Peek(frame_payload, current_frame_header.payload_size);
           reader.Consume();
 
@@ -245,14 +245,16 @@ struct Session {
             case OpCode::Close: {
               // Server is supposed to send a close opcode in response to a close request.
               // Write it out using a BufferWriter so it has the correct endianness.
+              constexpr u16 kNormalCloseCode = 1000;
+
               u16 close_code = 0;
               BufferWriter writer((u8*)&close_code, sizeof(close_code));
 
-              writer.WriteU16(1000);
+              writer.WriteU16(kNormalCloseCode);
 
               SendFrame(OpCode::Close, std::string_view((char*)&close_code, sizeof(close_code)));
 
-              return false;
+              return ProcessResult::Disconnect;
             } break;
             case OpCode::Ping: {
               SendFrame(OpCode::Pong, payload);
@@ -272,11 +274,11 @@ struct Session {
       } break;
       default: {
         fprintf(stderr, "Invalid session state. Closing connection.\n");
-        return false;
+        return ProcessResult::Disconnect;
       } break;
     }
 
-    return true;
+    return ProcessResult::Consumed;
   }
 
   void SendFrame(OpCode opcode, std::string_view data) {
@@ -301,17 +303,18 @@ struct Session {
 
     send(socket, (char*)header_data, (int)writer.GetWrittenSize(), 0);
     // TODO: This won't work for very large payloads because of the truncation.
-    // But it doesn't really matter because the entire sending would need to be written differently for large paylods.
+    // But it doesn't really matter because the entire sending would need to be written differently for large payloads.
     send(socket, data.data(), (int)data.size(), 0);
   }
 
-  bool ParseFrameHeader() {
-    // Parse frame header
+  // This tries to read the entire frame header from the buffer.
+  // If the entire frame header hasn't been received yet, it will return and wait for more data.
+  // The buffer will consume the entire frame header once the entire header has been received.
+  ProcessResult ParseFrameHeader() {
     ChunkedBufferReader reader(buffer);
-
     u16 frame_header;
 
-    if (!reader.Peek(&frame_header, sizeof(frame_header))) return false;
+    if (!reader.Peek(&frame_header, sizeof(frame_header))) return ProcessResult::Pending;
 
     u8 opcode_value = frame_header & 0xFF;
     u8 payload_len = frame_header >> 8;
@@ -322,30 +325,30 @@ struct Session {
     payload_len &= 0x7F;
     opcode_value &= 0x0F;
 
+    // These opcodes are reserved, so using them is illegal.
     if (opcode_value > 2 && opcode_value < 8) {
       fprintf(stderr, "Bad opcode: %d\n", (int)opcode_value);
-      close(socket);
-      return false;
+      return ProcessResult::Disconnect;
     }
 
     OpCode opcode = (OpCode)opcode_value;
-
     u64 total_len = payload_len;
 
+    // The frame header reserves 126 and 127 payload lengths as indicators of larger sizes that need to be parsed.
     if (payload_len == 126) {
       auto opt_ext_payload = reader.PeekU16();
-      if (!opt_ext_payload) return false;
+      if (!opt_ext_payload) return ProcessResult::Pending;
 
       total_len = *opt_ext_payload;
     } else if (payload_len == 127) {
       auto opt_ext_payload = reader.PeekU64();
-      if (!opt_ext_payload) return false;
+      if (!opt_ext_payload) return ProcessResult::Pending;
 
       total_len = *opt_ext_payload;
     }
 
     if (masked && !reader.Peek(current_frame_header.mask, sizeof(current_frame_header.mask))) {
-      return false;
+      return ProcessResult::Pending;
     }
 
     if (opcode != OpCode::Continuation) {
@@ -363,33 +366,28 @@ struct Session {
       current_frame_header.flags |= FrameHeaderFlag_Fin;
     }
 
-    // Consume entire frame header.
     reader.Consume();
 
-    return true;
+    return ProcessResult::Consumed;
   }
 };
 
 static bool OnRecv(ConnectionUserData user, char* data, size_t size) {
   Session* session = (Session*)user;
 
-#if 0
-  if (session->state != SessionState::Connecting) {
-    printf("Data: ");
-    for (size_t i = 0; i < size; ++i) {
-      printf("%02X ", (u8)data[i]);
-    }
-    printf("\n");
-  }
-#endif
   session->AppendData(data, size);
 
-  return session->ProcessData();
+  Session::ProcessResult result = Session::ProcessResult::Consumed;
+
+  // Continue processing the buffer until new data is necessary.
+  while (result == Session::ProcessResult::Consumed) {
+    result = session->ProcessData();
+  }
+
+  return result == Session::ProcessResult::Pending;
 }
 
 static ConnectionUserData OnAccept(ServerUserData user, QuackSocket socket) {
-  // printf("New user connection %d\n", (s32)socket);
-
   Session* session = new Session;
 
   session->socket = socket;
@@ -409,6 +407,7 @@ int main(int argc, char* argv[]) {
   iocp.recv_callback = OnRecv;
   iocp.close_callback = OnClose;
   iocp.buffer_size = kBufferSize;
+  iocp.concurrency = 4;
 
   if (!iocp.Start(8080)) {
     fprintf(stderr, "Failed to start iocp processor.\n");

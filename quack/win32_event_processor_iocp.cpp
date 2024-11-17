@@ -321,7 +321,7 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
     QuackIocpContext* io = (QuackIocpContext*)overlapped;
 
     if (!status) {
-      fprintf(stderr, "Status was false: %u\n", (u32)GetLastError());
+      // fprintf(stderr, "Status was false: %u\n", (u32)GetLastError());
 
       if (io) {
         if (io->operation == IoOperation::Accept) {
@@ -348,21 +348,35 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
 
     switch (io->operation) {
       case IoOperation::Accept: {
-        bool perform_recv = true;
+        QuackSocket client_fd = io->accept.client_fd;
+        _ReadWriteBarrier();
 
-        // printf("Processing accept (thread: %zu)\n", thread_ctx->thread_id);
-        // fflush(stdout);
+        io->accept.client_fd = WSASocketW(AF_INET, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_OVERLAPPED);
+        DisableTcpDelay(io->accept.client_fd);
+
+        // Immediately kick off a new accept before processing the current client, so another thread can begin
+        // accepting.
+        bool accept_result = quack_acceptex(io->accept.listen_fd, io->accept.client_fd, io->wsa_buf_read.buf, 0,
+                                            sizeof(struct sockaddr_in) + 16, sizeof(struct sockaddr_in) + 16,
+                                            &io->accept.bytes_recv, &io->overlapped);
+
+        if (!accept_result) {
+          int last_err = WSAGetLastError();
+
+          if (last_err != ERROR_IO_PENDING) {
+            printf("AcceptEx err: %d\n", last_err);
+          }
+        }
 
         // Process new accept
-        int result = setsockopt(io->accept.client_fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT,
-                                (const char*)&io->accept.listen_fd, sizeof(io->accept.listen_fd));
+        int result = setsockopt(client_fd, SOL_SOCKET, SO_UPDATE_ACCEPT_CONTEXT, (const char*)&io->accept.listen_fd,
+                                sizeof(io->accept.listen_fd));
 
         if (result == SOCKET_ERROR) {
           fprintf(stderr, "Failed to setsockopt.\n");
+          close(client_fd);
           continue;
         }
-
-        // printf("Accepting %zd\n", io->accept.client_fd);
 
         struct sockaddr* local_addr = NULL;
         struct sockaddr* remote_addr = NULL;
@@ -374,9 +388,10 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
                                      &remote_bytes);
 
         ConnectionUserData client_user_data = nullptr;
+        bool perform_recv = true;
 
         if (processor->accept_callback) {
-          client_user_data = processor->accept_callback(processor->server_user_data, io->accept.client_fd);
+          client_user_data = processor->accept_callback(processor->server_user_data, client_fd);
         }
 
         if (io_size > 0 && processor->recv_callback) {
@@ -389,16 +404,15 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
 
           QuackIocpContext* client_ctx = thread_ctx->AllocateIoContext(processor->buffer_size);
 
-          client_ctx->read.fd = io->accept.client_fd;
+          client_ctx->read.fd = client_fd;
           client_ctx->user = client_user_data;
 
           // Add the new client to the io completion port
-          if (CreateIoCompletionPort((HANDLE)io->accept.client_fd, thread_ctx->iocp, (ULONG_PTR)processor, 0) == NULL) {
+          if (CreateIoCompletionPort((HANDLE)client_fd, thread_ctx->iocp, (ULONG_PTR)processor, 0) == NULL) {
             fprintf(stderr, "Failed to add accepted socket to io port\n");
+            close(client_fd);
+            continue;
           }
-
-          // printf("Kicking off wsarecv for %d from accept\n", (int)io->accept.client_fd);
-          // fflush(stdout);
 
           int recv_result =
               WSARecv(client_ctx->read.fd, &client_ctx->wsa_buf_read, 1, NULL, &flags, &client_ctx->overlapped, NULL);
@@ -406,29 +420,7 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
             PrintNetworkError("WSARecv (accept): %s\n");
           }
         } else {
-          // printf("Closing %d from initial recv\n", (int)io->accept.client_fd);
-          // fflush(stdout);
-          close(io->accept.client_fd);
-        }
-
-        io->accept.client_fd = WSASocketW(AF_INET, SOCK_STREAM, 0, nullptr, 0, WSA_FLAG_OVERLAPPED);
-
-        DisableTcpDelay(io->accept.client_fd);
-
-        // printf("Beginning new accept (%d)\n", (int)io->accept.client_fd);
-        // fflush(stdout);
-        bool accept_result = quack_acceptex(io->accept.listen_fd, io->accept.client_fd, io->wsa_buf_read.buf, 0,
-                                            sizeof(struct sockaddr_in) + 16, sizeof(struct sockaddr_in) + 16,
-                                            &io->accept.bytes_recv, &io->overlapped);
-
-        if (!accept_result) {
-          int last_err = WSAGetLastError();
-
-          if (last_err != ERROR_IO_PENDING) {
-            printf("AcceptEx err: %d\n", last_err);
-          }
-        } else {
-          printf("acceptex immediate return\n");
+          close(client_fd);
         }
       } break;
       case IoOperation::Read: {
@@ -456,7 +448,8 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
           if (recv_more) {
             int recv_result = WSARecv(io->read.fd, &io->wsa_buf_read, 1, NULL, &flags, &io->overlapped, NULL);
             if (recv_result != 0 && WSAGetLastError() != ERROR_IO_PENDING) {
-              PrintNetworkError("WSARecv (read): %s\n");
+              // PrintNetworkError("WSARecv (read): %s\n");
+              close(io->read.fd);
             }
           } else {
             // fprintf(stderr, "----------- Connection force closed on socket %u.\n\n", (unsigned int)io->read.fd);
