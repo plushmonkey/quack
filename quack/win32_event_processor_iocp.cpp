@@ -145,13 +145,9 @@ struct Win32IocpServer {
   HANDLE io_handle = INVALID_HANDLE_VALUE;
 
   bool Initialize(DWORD concurrency) {
-    printf("Creating io completion port\n");
-
     io_handle = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, (ULONG_PTR)0, concurrency);
 
     if (io_handle == NULL || io_handle == INVALID_HANDLE_VALUE) return false;
-
-    printf("Creating thread pool\n");
 
     threads = new ThreadContext[concurrency * 2];
 
@@ -249,8 +245,6 @@ bool QuackEventProcessorIocp::Start(u16 port) {
 
   this->internal = server;
 
-  printf("Starting iocp\n");
-
   if (!server->Initialize(concurrency)) {
     fprintf(stderr, "Failed to initialize iocp.\n");
     return false;
@@ -298,8 +292,6 @@ bool QuackEventProcessorIocp::Start(u16 port) {
     printf("Failed to accept: %d\n", WSAGetLastError());
     return false;
   }
-
-  printf("Listening for connections\n");
 
   this->running = true;
   return true;
