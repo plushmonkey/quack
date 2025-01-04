@@ -29,6 +29,7 @@ struct QuackEventProcessorIocp {
   bool running = false;
 
   bool Start(u16 port);
+  void Stop();
 };
 
 }  // namespace quack

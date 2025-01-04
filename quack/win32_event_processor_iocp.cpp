@@ -305,6 +305,14 @@ bool QuackEventProcessorIocp::Start(u16 port) {
   return true;
 }
 
+void QuackEventProcessorIocp::Stop() {
+  this->running = false;
+
+  Win32IocpServer* server = (Win32IocpServer*)this->internal;
+
+  CloseHandle(server->io_handle);
+}
+
 DWORD WINAPI QuackIocpThread(void* thread_data) {
   ThreadContext* thread_ctx = (ThreadContext*)thread_data;
 
@@ -322,6 +330,12 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
 
     if (!status) {
       // fprintf(stderr, "Status was false: %u\n", (u32)GetLastError());
+      int iocp_error = GetLastError();
+
+      // Break out and terminate thread if the iocp handle becomes invalid (stopped).
+      if (iocp_error == ERROR_INVALID_HANDLE) {
+        break;
+      }
 
       if (io) {
         if (io->operation == IoOperation::Accept) {
@@ -340,6 +354,7 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
           close(io->read.fd);
         }
       }
+
       continue;
     }
 
@@ -477,6 +492,8 @@ DWORD WINAPI QuackIocpThread(void* thread_data) {
       } break;
     }
   }
+
+  return 0;
 }
 
 #if 0

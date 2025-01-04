@@ -31,6 +31,7 @@
     <ClCompile Include="quack\hash.cpp" />
     <ClCompile Include="quack\main.cpp" />
     <ClCompile Include="quack\platform.cpp" />
+    <ClCompile Include="quack\server.cpp" />
     <ClCompile Include="quack\win32_event_processor_iocp.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -38,6 +39,7 @@
     <ClInclude Include="quack\hash.h" />
     <ClInclude Include="quack\http.h" />
     <ClInclude Include="quack\platform.h" />
+    <ClInclude Include="quack\server.h" />
     <ClInclude Include="quack\types.h" />
     <ClInclude Include="quack\utility.h" />
     <ClInclude Include="quack\win32_event_processor_iocp.h" />
